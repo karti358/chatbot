@@ -1,0 +1,5 @@
+[core]
+    remote = azure-reddit-data
+['remote "azure-reddit-data"']
+    url = azure://data
+    account_name = redditchatbotdata
