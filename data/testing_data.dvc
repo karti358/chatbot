@@ -1,6 +1,6 @@
 outs:
-- md5: af6357f47944f81cb441fcd0829b73db.dir
-  size: 7217336
-  nfiles: 4
+- md5: 5b655014bd9c9aecf4049c715408f4bf.dir
+  size: 5327164
+  nfiles: 3
   hash: md5
   path: testing_data
