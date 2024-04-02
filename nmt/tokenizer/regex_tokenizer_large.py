@@ -12,7 +12,9 @@ Unlike BasicTokenizer:
 import regex as re
 from .base_tokenizer import Tokenizer, get_stats, merge
 import os
-import pyspark.pandas as pd
+# import pyspark.pandas as pd
+import sqlite3
+from numba import njit
 
 # the main GPT text split patterns, see
 # https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
@@ -32,6 +34,7 @@ class RegexTokenizerLarge(Tokenizer):
         assert vocab_size >= 256
         self.vocab_size = vocab_size
         self.num_merges = vocab_size - 256
+        print(f"The tokenizer will require {self.num_merges} iteraions of merges")
 
         self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
         self.compiled_pattern = re.compile(self.pattern)
@@ -41,44 +44,214 @@ class RegexTokenizerLarge(Tokenizer):
                                "<|padding|>": self.vocab_size + 3
                               }
         self.inverse_special_tokens = {}
-        
-    def train(self, files, verbose=False):
-        df = pd.read_csv(files, sep = "<||>", names = ["parent", "comment"], header = None, encoding = "utf-8")
-        
-        def process(row):
-            chunks = re.findall(self.compiled_pattern, row["parent"] + " " + row["comment"])
-            chunk_ids = [list(ch.encode("utf-8")) for ch in chunks]
-            return chunk_ids
-        df_chunk_ids = pd.DataFrame(df.apply(process, axis = 1, ), columns = ["chunks"])
-        print("Prepared the chunk ids ...")
+    
+    def chunkify(self, files: list, data_dir: str):
+        self.sql_transaction = []
+        self.counter = 0
 
-        def stat_process(chunk_ids, stats):
-            get_stats(chunk_ids["chunks"], stats)
+        self.chunk_db_path = data_dir + "/" + "full_chunks.db"
+        connection = sqlite3.connect(self.chunk_db_path)
+        cursor = connection.cursor()
 
-        def update_process(chunk_ids, pair, idx):
-            temp_ids = merge(chunk_ids["chunks"], pair, idx)
-            return temp_ids
+        def create_chunk_ids_table(cursor):
+            sql = f"""CREATE TABLE IF NOT EXISTS chunk_ids_{0}
+                     (
+                        id INTEGER PRIMARY KEY,
+                        text TEXT
+                     )"""
+            return cursor.execute(sql)
         
-        self.merges = {}
-        self.vocab = {idx: bytes([idx]) for idx in range(256)}
+        def transaction_builder(sql,cursor, conn):
+            self.sql_transaction.append(sql)
+            if len(self.sql_transaction) > 100000:
+                cursor.execute("BEGIN TRANSACTION;")
+                for s in self.sql_transaction:
+                    try:
+                        cursor.execute(s)
+                    except:
+                        pass
+                print(f"Inserted {self.counter} into chunk_ids_{0}...")
+                conn.commit()
+                self.sql_transaction = []
+        
+        def flush_pending(cursor, conn):
+            cursor.execute("BEGIN TRANSACTION;")
+            for s in self.sql_transaction:
+                try:
+                    cursor.execute(s)
+                except:
+                    pass
+            print(f"Flushed pending !! ...")
+            conn.commit()
+            self.sql_transaction = []
 
-        for i in range(self.merges):
-            stats = {}
-            df_chunk_ids.apply(stat_process, stats = stats, axis = 1)
+        def insert_into_chunk_ids(chunks, cursor, connection):
+            try:
+                ids = map(lambda x: ",".join( map(lambda y: str(int(y)), x)), map(lambda x: x.encode("utf-8"), chunks))
+                sql = f"INSERT INTO chunk_ids_{0} (text) VALUES (" +"),(".join( map(lambda x: f"'{x}'", ids)) + ");"
+                self.counter += 1
+                transaction_builder(sql,cursor, connection)
+            except:
+                print(f"Problem in inserting {chunks}")
+                print(list(map(lambda x: ",".join( map(lambda y: str(int(y)), x)), map(lambda x: x.encode("utf-8"), chunks))))
+                print("\n\n\n\n\n")
+        
+        cursor = create_chunk_ids_table(cursor)
+        for file in files:
+            print("Processing-->", file)
+            #Open the input file
+            with open(file, "r", encoding = "utf-8") as f:
+                #Iterate through the input file
+                for line in f:
+                    #Find the chunks in each line
+                    chunks = re.findall(self.compiled_pattern, line)
+                    #Write each chunk to chunks file
+                    insert_into_chunk_ids(chunks, cursor, connection)
             
-            pair = max(stats, key = stats.get)
+            if len(self.sql_transaction) > 0:
+                flush_pending(cursor, connection)
+            print("Done processing-->", file)
+            print("\n\n\n")     
+
+        connection.close() 
+    
+    def chunk_train(self, verbose = False):
+        connection = sqlite3.connect(self.chunk_db_path)
+        old_cursor = connection.cursor()
+
+        merges = {}
+        vocab = {idx: bytes([idx]) for idx in range(256)}
+
+        def create_chunk_ids_table(i, cursor):
+            sql = f"""CREATE TABLE IF NOT EXISTS chunk_ids_{i}
+                     (
+                        id INTEGER PRIMARY KEY,
+                        text TEXT
+                     )"""
+            return cursor.execute(sql)
+        
+        self.sql_transaction = []
+        self.counter = 0
+
+        def transaction_builder(i, sql, cursor, conn):
+            self.sql_transaction.append(sql)
+            if len(self.sql_transaction) > 100000:
+                cursor.execute("BEGIN TRANSACTION;")
+                for s in self.sql_transaction:
+                    try:
+                        cursor.execute(s)
+                    except:
+                        pass
+                print(f"Inserted {self.counter} completed in chunk_ids_{i}")
+                conn.commit()
+                self.sql_transaction = []
+
+        def insert_into_chunk_ids(i, ids, cursor, connection):
+            try:
+                temp = ",".join(map(lambda x: str(x), ids))
+                sql = f"INSERT INTO chunk_ids_{i} (text) VALUES (" + f"'{temp}'" + ")"
+                # print(sql)
+                self.counter += 1
+                transaction_builder(i, sql,cursor, connection)
+            except:
+                print(f"Problem in inserting {ids}")
+        
+        def flush_pending(i, cursor, conn):
+            cursor.execute("BEGIN TRANSACTION;")
+            for s in self.sql_transaction:
+                try:
+                    cursor.execute(s)
+                except:
+                    pass
+            print("Flushed the pending...")
+            conn.commit()
+            self.sql_transaction = []
+        
+        # @njit
+        def process_stats(old_cursor):
+            stats = dict()
+
+            print(old_cursor.execute(f"SELECT count(*) FROM chunk_ids_{i-1}").fetchall())
+            old_cursor.execute(f"SELECT * FROM chunk_ids_{i-1}")
+
+            rows = old_cursor.fetchmany(100000)
+            rows_counter = len(rows)
+            while len(rows) > 0:
+                for row in rows:
+                    #Convert str to ints
+                    chunk_ids = list(map(int, row[1].split(",")))
+                    #Get stats for the present chunk ids
+                    get_stats(chunk_ids, stats)
+                    # print(row)
+                print(f"Processed {rows_counter} rows")
+                rows = old_cursor.fetchmany(100000)
+                rows_counter += len(rows)
+            return stats
+        
+        # @njit
+        def update_ids(i, old_cursor, connection):
+            new_cursor = connection.cursor()
+            new_cursor = create_chunk_ids_table(i, new_cursor)
+
+            self.counter = 0
+
+            old_cursor.execute(f"SELECT * FROM chunk_ids_{i-1}")
+            rows = old_cursor.fetchmany(100000)
+            rows_counter = len(rows)
+            while len(rows) > 0:
+                for row in rows:
+                    #Convert str to ints
+                    chunk_ids = list(map(int, row[1].split(",")))
+                    #Update the chunk ids
+                    temp_ids = merge(chunk_ids, pair, idx)
+                    #Wrtite the updated chunk ids
+                    insert_into_chunk_ids(i, temp_ids, new_cursor, connection)
+                print(f"Processed {rows_counter} rows")
+                rows = old_cursor.fetchmany(100000)
+                rows_counter += len(rows)
+            if len(self.sql_transaction) > 0:
+                flush_pending(i, new_cursor, connection)
+            
+            return new_cursor
+
+        for i in range(1, self.num_merges + 1):
+            print(f"Starting merge {i}")
+
+            #get stats
+            stats = process_stats(old_cursor)            
+
+            #Get the most occuring pair
+            pair = max(stats, key=stats.get)
+            #Define new index
             idx = 256 + i
 
-            df_chunk_ids = pd.DataFrame(df_chunk_ids.apply(update_process, pair = pair, idx = idx, axis = 1), columns = ["chunks"])
+            #Open the old chunk_ids file and new_chunk_ids file
+            new_cursor = update_ids(i, old_cursor, connection)
 
+            #Update merges dictionary
             merges[pair] = idx
+            #Update the vocab dictionary
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
 
-        if verbose:
-            print(f"merge {i+1}/{self.num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+            #Delete the old chunk file
+            # os.remove(self.chunk_ids)
+            old_cursor.execute(f"DROP TABLE chunk_ids_{i-1}")
+        
+            #Update the chunk_ids file to the new chunk ids file
+            old_cursor = new_cursor
 
+            if verbose:
+                print(f"merge {i+1}/{self.num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences \n\n\n")
+
+        connection.close()
         self.merges = merges
         self.vocab = vocab
+        
+    def train(self, files: str,data_dir: str, verbose=False):
+        self.chunkify(files, data_dir)
+        self.chunk_train(verbose = verbose)
+
+        print(self.merges, self.vocab)
 
     def register_special_tokens(self, special_tokens):
         # special_tokens is a dictionary of str -> int
