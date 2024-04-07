@@ -24,7 +24,7 @@ GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1
 
 class RegexTokenizerLarge(Tokenizer):
 
-    def __init__(self, vocab_size = 276, pattern=None):
+    def __init__(self, vocab_size = 276,special_tokens = {}, pattern=None):
         """
         - pattern: optional string to override the default (GPT-4 split pattern)
         - special_tokens: str -> int dictionary of special tokens
@@ -38,12 +38,12 @@ class RegexTokenizerLarge(Tokenizer):
 
         self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
         self.compiled_pattern = re.compile(self.pattern)
-        self.special_tokens = {"<|newlinechar|>" : self.vocab_size,
+        self.special_tokens = special_tokens if len(special_tokens) > 0 else {"<|newlinechar|>" : self.vocab_size,
                                "<|start|>" : self.vocab_size + 1,
                                "<|end|>" : self.vocab_size + 2,
                                "<|padding|>": self.vocab_size + 3
                               }
-        self.inverse_special_tokens = {}
+        self.inverse_special_tokens = self.inverse_special_tokens = {v: k for k, v in special_tokens.items()}
     
     def chunkify(self, files: list, data_dir: str):
         self.sql_transaction = []
@@ -253,16 +253,7 @@ class RegexTokenizerLarge(Tokenizer):
 
         print(self.merges, self.vocab)
 
-    def register_special_tokens(self, special_tokens):
-        # special_tokens is a dictionary of str -> int
-        # example: {"<|endoftext|>": 100257}
-        self.special_tokens = special_tokens
-        self.inverse_special_tokens = {v: k for k, v in special_tokens.items()}
-
     def decode(self, ids):
-        #This is temperory
-        self.inverse_special_tokens = {v: k for k, v in self.special_tokens.items()}
-
         # given ids (list of integers), return Python string
         part_bytes = []
         for idx in ids:

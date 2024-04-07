@@ -11,7 +11,7 @@ tokenizer.save("models/tokenizer/bpe_tokenizer_1")
 #         temp = " ".join(line.split("<||>"))
 
 #         fout.write(temp)
-#         if i == 100000:
+#         if i == 5000:
 #             break
 
 
