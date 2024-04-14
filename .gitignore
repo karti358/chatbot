@@ -162,3 +162,5 @@ cython_debug/
 test.py
 .vscode/
 .vscode/settings.json
+data/chunks.db
+data/chunks.db-journal
